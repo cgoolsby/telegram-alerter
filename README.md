@@ -124,6 +124,51 @@ the cluster is down. `--via-service` exercises the deployed service instead.
 - `POST /send` — send a free-form message (bearer auth required)
 - `POST /webhook/alertmanager` — Alertmanager/Grafana webhook receiver (bearer auth required)
 - `GET /healthz` — liveness/readiness probe (no auth)
+- `GET /metrics` — Prometheus metrics (no auth)
+
+## Install with Helm
+
+A chart lives in [`chart/`](chart/). It templates the Deployment, Service,
+optional Secret, ServiceMonitor, and NetworkPolicy.
+
+```sh
+# create the credentials Secret (recommended over putting tokens in values)
+kubectl create namespace telegram-alerter
+kubectl -n telegram-alerter create secret generic telegram-alerter \
+  --from-literal=TELEGRAM_BOT_TOKEN='<bot token>' \
+  --from-literal=TELEGRAM_CHAT_ID='<chat id>' \
+  --from-literal=AUTH_TOKEN='<auth token>'
+
+helm install telegram-alerter ./chart -n telegram-alerter \
+  --set serviceMonitor.enabled=true \
+  --set serviceMonitor.labels.release=kube-prometheus-stack
+```
+
+Alternatively let the chart create the Secret (keep tokens out of git — pass
+via `--set` or an uncommitted values file):
+
+```sh
+helm install telegram-alerter ./chart -n telegram-alerter --create-namespace \
+  --set secret.create=true \
+  --set secret.botToken=... --set secret.chatId=... --set secret.authToken=...
+```
+
+Key values (`chart/values.yaml`): `image.tag` (defaults to the chart
+appVersion), `secret.create` / `secret.existingSecret`, `serviceMonitor.*`,
+`networkPolicy.enabled`, `resources`.
+
+## Metrics
+
+`/metrics` exposes a Prometheus counter:
+
+```
+telegram_alerter_messages_total{endpoint="send|alertmanager",result="sent|failed|rejected"}
+```
+
+`result` is `sent` (delivered), `failed` (Telegram rejected/unreachable), or
+`rejected` (bad auth or invalid input). Enable scraping with
+`serviceMonitor.enabled=true` and set `serviceMonitor.labels` to match your
+Prometheus release selector.
 
 ## Grafana & Alertmanager integration
 

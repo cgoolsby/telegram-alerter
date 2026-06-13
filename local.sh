@@ -88,6 +88,9 @@ check() { # check <name> <expected_code> <actual_code>
 code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:18080/healthz)
 check "healthz" 200 "$code"
 
+code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:18080/metrics)
+check "metrics endpoint" 200 "$code"
+
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:18080/send \
   -H "Content-Type: application/json" -d '{"message":"should be rejected"}')
 check "missing auth rejected" 401 "$code"

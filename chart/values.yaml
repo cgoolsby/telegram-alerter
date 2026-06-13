@@ -1,0 +1,66 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/cgoolsby/telegram-alerter
+  # Defaults to the chart's appVersion when empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: ClusterIP
+  port: 80
+
+# Credentials. Either reference an existing Secret (recommended — keeps tokens
+# out of values/git) or have the chart create one from the values below.
+secret:
+  create: false
+  existingSecret: telegram-alerter
+  # Used only when create: true. Prefer --set or a separate values file you
+  # do NOT commit.
+  botToken: ""
+  chatId: ""
+  authToken: ""
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 64Mi
+  limits:
+    cpu: 100m
+    memory: 128Mi
+
+# Prometheus Operator ServiceMonitor for scraping /metrics. Requires the
+# ServiceMonitor CRD (kube-prometheus-stack / prometheus-operator).
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  path: /metrics
+  # Extra labels so your Prometheus release selector picks it up, e.g.
+  #   release: kube-prometheus-stack
+  labels: {}
+
+# Allow ingress from your monitoring namespace (only needed under default-deny).
+networkPolicy:
+  enabled: false
+  monitoringNamespace: monitoring
+
+podAnnotations: {}
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

@@ -257,3 +257,35 @@ func TestHealthz(t *testing.T) {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
 }
+
+func TestMetricsCountsSendsAndRejections(t *testing.T) {
+	tg := fakeTelegram(t, http.StatusOK, `{"ok":true}`, nil)
+	defer tg.Close()
+	s := testServer(t, tg.URL)
+
+	// one successful send, one rejected (bad auth)
+	if rec := doSend(s, "Bearer test-auth-token", `{"message":"hi"}`); rec.Code != http.StatusOK {
+		t.Fatalf("send failed: %d", rec.Code)
+	}
+	if rec := doSend(s, "Bearer nope", `{"message":"hi"}`); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rec.Code)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	s.routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 from /metrics, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"# TYPE telegram_alerter_messages_total counter",
+		`telegram_alerter_messages_total{endpoint="send",result="sent"} 1`,
+		`telegram_alerter_messages_total{endpoint="send",result="rejected"} 1`,
+		`telegram_alerter_messages_total{endpoint="alertmanager",result="sent"} 0`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected /metrics to contain %q, got:\n%s", want, body)
+		}
+	}
+}

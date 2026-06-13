@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -27,8 +28,9 @@ type config struct {
 }
 
 type server struct {
-	cfg    config
-	client *http.Client
+	cfg     config
+	client  *http.Client
+	metrics *metrics
 }
 
 type sendRequest struct {
@@ -66,6 +68,46 @@ type alert struct {
 	Labels      map[string]string `json:"labels"`
 	Annotations map[string]string `json:"annotations"`
 	StartsAt    string            `json:"startsAt"`
+}
+
+// metrics is a tiny stdlib Prometheus counter for messages by endpoint/result.
+// Series are pre-seeded so rate() works from the first scrape.
+type metrics struct {
+	mu     sync.Mutex
+	counts map[[2]string]int64
+}
+
+var (
+	metricEndpoints = []string{"send", "alertmanager"}
+	metricResults   = []string{"sent", "failed", "rejected"}
+)
+
+func newMetrics() *metrics {
+	m := &metrics{counts: make(map[[2]string]int64)}
+	for _, e := range metricEndpoints {
+		for _, r := range metricResults {
+			m.counts[[2]string{e, r}] = 0
+		}
+	}
+	return m
+}
+
+func (m *metrics) inc(endpoint, result string) {
+	m.mu.Lock()
+	m.counts[[2]string{endpoint, result}]++
+	m.mu.Unlock()
+}
+
+func (m *metrics) write(w io.Writer) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	fmt.Fprintln(w, "# HELP telegram_alerter_messages_total Messages processed by endpoint and result.")
+	fmt.Fprintln(w, "# TYPE telegram_alerter_messages_total counter")
+	for _, e := range metricEndpoints {
+		for _, r := range metricResults {
+			fmt.Fprintf(w, "telegram_alerter_messages_total{endpoint=%q,result=%q} %d\n", e, r, m.counts[[2]string{e, r}])
+		}
+	}
 }
 
 func loadConfig() (config, error) {
@@ -160,24 +202,29 @@ func (s *server) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.authorized(r) {
+		s.metrics.inc("send", "rejected")
 		writeError(w, http.StatusUnauthorized, "missing or invalid bearer token")
 		return
 	}
 
 	var req sendRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		s.metrics.inc("send", "rejected")
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
 	if strings.TrimSpace(req.Message) == "" {
+		s.metrics.inc("send", "rejected")
 		writeError(w, http.StatusBadRequest, "message is required")
 		return
 	}
 
 	if err := s.sendMessage(req.ChatID, req.Message, req.ParseMode, req.Silent); err != nil {
+		s.metrics.inc("send", "failed")
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
+	s.metrics.inc("send", "sent")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -189,18 +236,21 @@ func (s *server) handleAlertmanager(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.authorized(r) {
+		s.metrics.inc("alertmanager", "rejected")
 		writeError(w, http.StatusUnauthorized, "missing or invalid bearer token")
 		return
 	}
 
 	var payload alertmanagerPayload
 	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&payload); err != nil {
+		s.metrics.inc("alertmanager", "rejected")
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
 
 	text := formatAlertmanager(payload)
 	if text == "" {
+		s.metrics.inc("alertmanager", "rejected")
 		writeError(w, http.StatusBadRequest, "no alerts in payload")
 		return
 	}
@@ -208,9 +258,11 @@ func (s *server) handleAlertmanager(w http.ResponseWriter, r *http.Request) {
 	// Plain text (no parse_mode) so arbitrary label/annotation content can't
 	// produce malformed markup that Telegram would reject.
 	if err := s.sendMessage("", text, "", false); err != nil {
+		s.metrics.inc("alertmanager", "failed")
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
+	s.metrics.inc("alertmanager", "sent")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -267,6 +319,11 @@ func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("ok"))
 }
 
+func (s *server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	s.metrics.write(w)
+}
+
 // redactToken keeps the bot token out of logs; Telegram URLs embed it,
 // so transport errors can leak it via the request URL.
 func redactToken(msg, token string) string {
@@ -275,8 +332,9 @@ func redactToken(msg, token string) string {
 
 func newServer(cfg config) *server {
 	return &server{
-		cfg:    cfg,
-		client: &http.Client{Timeout: 10 * time.Second},
+		cfg:     cfg,
+		client:  &http.Client{Timeout: 10 * time.Second},
+		metrics: newMetrics(),
 	}
 }
 
@@ -285,6 +343,7 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("/send", s.handleSend)
 	mux.HandleFunc("/webhook/alertmanager", s.handleAlertmanager)
 	mux.HandleFunc("/healthz", s.handleHealthz)
+	mux.HandleFunc("/metrics", s.handleMetrics)
 	return mux
 }
 
