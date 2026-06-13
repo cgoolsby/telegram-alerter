@@ -6,10 +6,11 @@
 k8s/secret.yaml
 k8s/*secret*.yaml
 !k8s/secret.example.yaml
-# Env files with tokens
+# Env files with tokens (the placeholder example is allowed)
 .env
 .env.*
 *.env
+!.env.example
 # Generic credential/key files
 credentials*
 *.pem

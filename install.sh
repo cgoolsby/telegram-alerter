@@ -19,6 +19,15 @@ set -euo pipefail
 NAMESPACE=telegram-alerter
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Load credentials from .env if present (see .env.example); env vars already
+# set in the shell take precedence.
+if [[ -f "$SCRIPT_DIR/.env" ]]; then
+  while IFS='=' read -r key value; do
+    [[ "$key" =~ ^[A-Z_]+$ ]] || continue
+    [[ -z "${!key:-}" ]] && export "$key=$value"
+  done < "$SCRIPT_DIR/.env"
+fi
+
 log()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
