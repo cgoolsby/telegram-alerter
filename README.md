@@ -88,6 +88,21 @@ curl -X POST http://localhost:8080/send \
   -d '{"message":"test page"}'
 ```
 
+### Page yourself from localhost
+
+`send.sh` is a small client that reads `.env` and texts you:
+
+```sh
+./send.sh "disk is full on node-1"
+echo "build failed" | ./send.sh          # message from stdin
+./send.sh -s "quiet note"                # silent (no notification sound)
+./send.sh -m HTML "<b>bold</b> alert"    # parse_mode HTML or MarkdownV2
+./send.sh --via-service "msg"            # route through the deployed pod (port-forward)
+```
+
+Direct mode (default) talks straight to the Telegram API, so it works even if
+the cluster is down. `--via-service` exercises the deployed service instead.
+
 ### Request body
 
 | Field        | Type   | Required | Notes                                              |
