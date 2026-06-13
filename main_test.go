@@ -149,6 +149,105 @@ func TestSendPassesThroughTelegramError(t *testing.T) {
 	}
 }
 
+func doPost(s *server, path, authHeader, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	if authHeader != "" {
+		req.Header.Set("Authorization", authHeader)
+	}
+	rec := httptest.NewRecorder()
+	s.routes().ServeHTTP(rec, req)
+	return rec
+}
+
+const firingPayload = `{
+  "status": "firing",
+  "alerts": [
+    {"status":"firing","labels":{"alertname":"HighCPU","severity":"critical","instance":"node-1"},
+     "annotations":{"summary":"CPU above 90% for 5m"}},
+    {"status":"firing","labels":{"alertname":"DiskFull","severity":"warning","instance":"node-2"},
+     "annotations":{"description":"disk at 95%"}}
+  ]
+}`
+
+func TestAlertmanagerRejectsMissingAuth(t *testing.T) {
+	s := testServer(t, "http://unused")
+	rec := doPost(s, "/webhook/alertmanager", "", firingPayload)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rec.Code)
+	}
+}
+
+func TestAlertmanagerFormatsFiring(t *testing.T) {
+	var captured telegramSendMessage
+	tg := fakeTelegram(t, http.StatusOK, `{"ok":true}`, &captured)
+	defer tg.Close()
+
+	s := testServer(t, tg.URL)
+	rec := doPost(s, "/webhook/alertmanager", "Bearer test-auth-token", firingPayload)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if captured.ChatID != "12345" {
+		t.Errorf("expected default chat_id, got %q", captured.ChatID)
+	}
+	for _, want := range []string{"FIRING", "2 alert(s)", "[critical] HighCPU on node-1", "CPU above 90%", "[warning] DiskFull on node-2", "disk at 95%"} {
+		if !strings.Contains(captured.Text, want) {
+			t.Errorf("expected formatted text to contain %q, got:\n%s", want, captured.Text)
+		}
+	}
+	if strings.HasPrefix(captured.Text, "🔥") == false {
+		t.Errorf("expected firing emoji prefix, got: %s", captured.Text)
+	}
+}
+
+func TestAlertmanagerResolvedEmoji(t *testing.T) {
+	var captured telegramSendMessage
+	tg := fakeTelegram(t, http.StatusOK, `{"ok":true}`, &captured)
+	defer tg.Close()
+
+	s := testServer(t, tg.URL)
+	body := `{"status":"resolved","alerts":[{"status":"resolved","labels":{"alertname":"HighCPU"}}]}`
+	rec := doPost(s, "/webhook/alertmanager", "Bearer test-auth-token", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if !strings.HasPrefix(captured.Text, "✅") {
+		t.Errorf("expected resolved emoji prefix, got: %s", captured.Text)
+	}
+	if !strings.Contains(captured.Text, "RESOLVED") {
+		t.Errorf("expected RESOLVED in text, got: %s", captured.Text)
+	}
+}
+
+func TestAlertmanagerEmptyAlertsRejected(t *testing.T) {
+	s := testServer(t, "http://unused")
+	rec := doPost(s, "/webhook/alertmanager", "Bearer test-auth-token", `{"status":"firing","alerts":[]}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestAlertmanagerTruncatesManyAlerts(t *testing.T) {
+	var captured telegramSendMessage
+	tg := fakeTelegram(t, http.StatusOK, `{"ok":true}`, &captured)
+	defer tg.Close()
+
+	var alerts []string
+	for i := 0; i < maxAlertsListed+5; i++ {
+		alerts = append(alerts, `{"status":"firing","labels":{"alertname":"A"}}`)
+	}
+	body := `{"status":"firing","alerts":[` + strings.Join(alerts, ",") + `]}`
+
+	s := testServer(t, tg.URL)
+	rec := doPost(s, "/webhook/alertmanager", "Bearer test-auth-token", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if !strings.Contains(captured.Text, "and 5 more") {
+		t.Errorf("expected overflow note, got:\n%s", captured.Text)
+	}
+}
+
 func TestHealthz(t *testing.T) {
 	s := testServer(t, "http://unused")
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)

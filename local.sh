@@ -110,6 +110,14 @@ code=$(curl -s -o /tmp/telegram-alerter-local-test.out -w '%{http_code}' \
 check "real send to telegram" 200 "$code"
 [[ "$code" == "200" ]] || cat /tmp/telegram-alerter-local-test.out >&2 || true
 
+code=$(curl -s -o /tmp/telegram-alerter-local-test.out -w '%{http_code}' \
+  -X POST http://localhost:18080/webhook/alertmanager \
+  -H "Authorization: Bearer $AUTH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"status":"firing","alerts":[{"status":"firing","labels":{"alertname":"E2ETest","severity":"info","instance":"kind"},"annotations":{"summary":"alertmanager webhook e2e test"}}]}')
+check "alertmanager webhook" 200 "$code"
+[[ "$code" == "200" ]] || cat /tmp/telegram-alerter-local-test.out >&2 || true
+
 kill "$PF_PID" 2>/dev/null || true
 trap - EXIT
 

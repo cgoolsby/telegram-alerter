@@ -121,8 +121,62 @@ the cluster is down. `--via-service` exercises the deployed service instead.
 
 ## Endpoints
 
-- `POST /send` — send a message (bearer auth required)
+- `POST /send` — send a free-form message (bearer auth required)
+- `POST /webhook/alertmanager` — Alertmanager/Grafana webhook receiver (bearer auth required)
 - `GET /healthz` — liveness/readiness probe (no auth)
+
+## Grafana & Alertmanager integration
+
+### Grafana (works as-is)
+
+Grafana's webhook contact point already sends a `message` field, so point it
+straight at `/send`:
+
+- **URL**: `http://telegram-alerter.telegram-alerter.svc/send`
+- **Authorization Header** → Scheme `Bearer`, Credentials `<AUTH_TOKEN>`
+
+Customize the notification template to control what lands in `message`.
+
+### Alertmanager
+
+Alertmanager's webhook body has a fixed shape (no `message` field), so use the
+dedicated receiver `/webhook/alertmanager`, which formats the alerts for you:
+
+```yaml
+receivers:
+  - name: telegram-pager
+    webhook_configs:
+      - url: http://telegram-alerter.telegram-alerter.svc/webhook/alertmanager
+        send_resolved: true
+        http_config:
+          authorization:
+            type: Bearer
+            credentials: <AUTH_TOKEN>
+```
+
+The receiver renders a concise page like:
+
+```
+🔥 FIRING: 2 alert(s)
+[critical] HighCPU on node-1
+  CPU above 90% for 5m
+[warning] DiskFull on node-2
+  disk at 95%
+```
+
+It reads `alertname`, `severity`, and `instance` labels and the `summary`
+(or `description`) annotation, caps the list at 10 alerts, and switches the
+emoji to ✅ for resolved notifications.
+
+### Two things to check
+
+1. **Reachability.** Prometheus/Grafana usually live in a `monitoring`
+   namespace; the service DNS above works cross-namespace. If you run
+   default-deny NetworkPolicies, apply `k8s/networkpolicy.example.yaml`
+   (adjust the namespace selector) to allow ingress from monitoring.
+2. **Throttling.** Tune grouping on the *sender* side — Alertmanager's
+   `group_by` / `group_wait` / `repeat_interval`, or Grafana's notification
+   policy — so a flapping target doesn't page you dozens of times.
 
 ## Configuration (env vars)
 

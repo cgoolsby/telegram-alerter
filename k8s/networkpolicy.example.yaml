@@ -1,0 +1,25 @@
+# OPTIONAL — only needed if you run default-deny NetworkPolicies.
+# Allows ingress to the alerter pod from your monitoring namespace so
+# Alertmanager/Grafana can reach POST /webhook/alertmanager and /send.
+#
+# Adjust the namespace label selector to match your monitoring namespace.
+# (kube-prometheus-stack typically labels it kubernetes.io/metadata.name: monitoring)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-monitoring-ingress
+  namespace: telegram-alerter
+spec:
+  podSelector:
+    matchLabels:
+      app: telegram-alerter
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 8080
