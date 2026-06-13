@@ -130,3 +130,12 @@ TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=... AUTH_TOKEN=test go run .
 ```sh
 make test
 ```
+
+End-to-end test in a local [kind](https://kind.sigs.k8s.io/) cluster (builds
+the image, deploys the full stack, verifies auth/validation, and sends a real
+test page to your Telegram — needs `.env`):
+
+```sh
+./local.sh        # create cluster + deploy + test
+./local.sh down   # tear down the kind cluster
+```
