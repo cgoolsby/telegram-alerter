@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: telegram-alerter
+  namespace: telegram-alerter
+  labels:
+    app: telegram-alerter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: telegram-alerter
+  template:
+    metadata:
+      labels:
+        app: telegram-alerter
+    spec:
+      containers:
+        - name: telegram-alerter
+          # Replace with your registry, e.g. registry.example.com/telegram-alerter:v1
+          image: IMAGE_PLACEHOLDER
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - secretRef:
+                name: telegram-alerter
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault

@@ -1,0 +1,17 @@
+# Built binary
+/telegram-alerter
+
+# --- credentials: never commit these ---
+# Real k8s secret manifests (only secret.example.yaml belongs in git)
+k8s/secret.yaml
+k8s/*secret*.yaml
+!k8s/secret.example.yaml
+# Env files with tokens
+.env
+.env.*
+*.env
+# Generic credential/key files
+credentials*
+*.pem
+*.key
+token.txt

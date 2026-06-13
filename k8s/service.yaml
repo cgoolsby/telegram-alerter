@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: telegram-alerter
+  namespace: telegram-alerter
+  labels:
+    app: telegram-alerter
+spec:
+  type: ClusterIP
+  selector:
+    app: telegram-alerter
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
