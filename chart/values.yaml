@@ -25,6 +25,16 @@ secret:
   chatId: ""
   authToken: ""
 
+# Service behaviour (non-secret env on the Deployment).
+config:
+  # Suppress duplicate messages (same chat + text) within this many seconds.
+  # 0 disables throttling. Throttled messages return 200 {"throttled":true}
+  # and increment the throttled metric.
+  throttleWindowSeconds: 0
+  # Log a one-line preview of each sent message (feeds the Loki "last messages"
+  # dashboard panel). Set false to log only metadata.
+  logMessageContent: true
+
 resources:
   requests:
     cpu: 10m
@@ -48,6 +58,45 @@ serviceMonitor:
 networkPolicy:
   enabled: false
   monitoringNamespace: monitoring
+
+# Hot-loaded Grafana dashboard (ConfigMap discovered by the Grafana sidecar).
+# Shows failed sends, throttles, and the last N messages sent (from logs).
+grafanaDashboard:
+  enabled: false
+  # Namespace the ConfigMap is created in (where the Grafana sidecar watches).
+  namespace: monitoring
+  # Sidecar discovery label + Grafana folder.
+  sidecarLabel: grafana_dashboard
+  sidecarLabelValue: "1"
+  folder: "Telegram Alerter"
+  # Datasources to query. Match your cluster's datasource UIDs/types.
+  datasources:
+    metrics:
+      uid: victoria-metrics
+      type: victoriametrics-metrics-datasource
+    logs:
+      uid: loki
+      type: loki
+  # Number of recent messages shown in the logs panel.
+  lastMessagesCount: 15
+
+# Prometheus alerting rules (PrometheusRule CRD).
+prometheusRule:
+  enabled: false
+  namespace: monitoring
+  additionalLabels:
+    app.kubernetes.io/part-of: kube-prometheus-stack
+  # Failed sends per second (5m avg) above this fires a warning.
+  failureRateThreshold: 0.05
+  # Throttled messages per second (5m avg) above this fires a warning.
+  throttleRateThreshold: 0.1
+  severity:
+    failures: warning
+    allFailing: critical
+    throttling: warning
+    down: critical
+  # Optional runbook URL attached to every alert annotation.
+  runbookUrl: ""
 
 podAnnotations: {}
 podSecurityContext:

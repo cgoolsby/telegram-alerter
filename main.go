@@ -2,13 +2,17 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,20 +21,28 @@ import (
 const (
 	telegramMaxMessageLen = 4096
 	maxAlertsListed       = 10
+	previewMaxLen         = 120
 )
 
+// errTelegramThrottled marks a Telegram 429 (rate limited) so callers can
+// distinguish throttling from other failures.
+var errTelegramThrottled = errors.New("telegram rate limited")
+
 type config struct {
-	botToken  string
-	chatID    string
-	authToken string
-	port      string
-	apiBase   string
+	botToken       string
+	chatID         string
+	authToken      string
+	port           string
+	apiBase        string
+	throttleWindow time.Duration
+	logContent     bool
 }
 
 type server struct {
-	cfg     config
-	client  *http.Client
-	metrics *metrics
+	cfg      config
+	client   *http.Client
+	metrics  *metrics
+	throttle *throttler
 }
 
 type sendRequest struct {
@@ -79,7 +91,7 @@ type metrics struct {
 
 var (
 	metricEndpoints = []string{"send", "alertmanager"}
-	metricResults   = []string{"sent", "failed", "rejected"}
+	metricResults   = []string{"sent", "failed", "throttled", "rejected"}
 )
 
 func newMetrics() *metrics {
@@ -110,13 +122,52 @@ func (m *metrics) write(w io.Writer) {
 	}
 }
 
+// throttler suppresses duplicate messages (same chat+text) seen within a
+// window, so a flapping alert source can't spam Telegram. A zero window
+// disables it.
+type throttler struct {
+	window time.Duration
+	mu     sync.Mutex
+	seen   map[string]time.Time
+}
+
+func newThrottler(window time.Duration) *throttler {
+	return &throttler{window: window, seen: make(map[string]time.Time)}
+}
+
+// allow reports whether a message may be sent now, recording it if so.
+func (t *throttler) allow(key string) bool {
+	if t.window <= 0 {
+		return true
+	}
+	now := time.Now()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for k, ts := range t.seen {
+		if now.Sub(ts) > t.window {
+			delete(t.seen, k)
+		}
+	}
+	if ts, ok := t.seen[key]; ok && now.Sub(ts) <= t.window {
+		return false
+	}
+	t.seen[key] = now
+	return true
+}
+
+func throttleKey(chatID, text string) string {
+	sum := sha256.Sum256([]byte(chatID + "\x00" + text))
+	return hex.EncodeToString(sum[:])
+}
+
 func loadConfig() (config, error) {
 	cfg := config{
-		botToken:  os.Getenv("TELEGRAM_BOT_TOKEN"),
-		chatID:    os.Getenv("TELEGRAM_CHAT_ID"),
-		authToken: os.Getenv("AUTH_TOKEN"),
-		port:      os.Getenv("PORT"),
-		apiBase:   os.Getenv("TELEGRAM_API_BASE"),
+		botToken:   os.Getenv("TELEGRAM_BOT_TOKEN"),
+		chatID:     os.Getenv("TELEGRAM_CHAT_ID"),
+		authToken:  os.Getenv("AUTH_TOKEN"),
+		port:       os.Getenv("PORT"),
+		apiBase:    os.Getenv("TELEGRAM_API_BASE"),
+		logContent: true,
 	}
 	if cfg.botToken == "" {
 		return cfg, fmt.Errorf("TELEGRAM_BOT_TOKEN is required")
@@ -132,6 +183,14 @@ func loadConfig() (config, error) {
 	}
 	if cfg.apiBase == "" {
 		cfg.apiBase = "https://api.telegram.org"
+	}
+	if v := os.Getenv("THROTTLE_WINDOW_SECONDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.throttleWindow = time.Duration(n) * time.Second
+		}
+	}
+	if v := os.Getenv("LOG_MESSAGE_CONTENT"); v != "" {
+		cfg.logContent, _ = strconv.ParseBool(v)
 	}
 	return cfg, nil
 }
@@ -157,6 +216,7 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 
 // sendMessage posts text to Telegram. The returned error is safe to surface to
 // callers (the bot token is never included). Falls back to the default chat.
+// A Telegram 429 is returned wrapped in errTelegramThrottled.
 func (s *server) sendMessage(chatID, text, parseMode string, silent bool) error {
 	if chatID == "" {
 		chatID = s.cfg.chatID
@@ -189,11 +249,60 @@ func (s *server) sendMessage(chatID, text, parseMode string, silent bool) error 
 	}
 	if !tgResp.OK {
 		log.Printf("telegram rejected message (status %d): %s", resp.StatusCode, tgResp.Description)
+		if resp.StatusCode == http.StatusTooManyRequests {
+			return fmt.Errorf("%w: %s", errTelegramThrottled, tgResp.Description)
+		}
 		return fmt.Errorf("telegram error: %s", tgResp.Description)
 	}
-
-	log.Printf("message sent to chat %s (%d chars)", chatID, len(text))
 	return nil
+}
+
+// deliver runs the throttle check, sends, records metrics, and writes the HTTP
+// response. endpoint labels the metrics ("send" or "alertmanager").
+func (s *server) deliver(w http.ResponseWriter, endpoint, chatID, text, parseMode string, silent bool) {
+	if !s.throttle.allow(throttleKey(chatID, text)) {
+		s.metrics.inc(endpoint, "throttled")
+		log.Printf("event=message_throttled endpoint=%s chat=%s", endpoint, effectiveChat(chatID, s.cfg.chatID))
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "throttled": true})
+		return
+	}
+	if err := s.sendMessage(chatID, text, parseMode, silent); err != nil {
+		if errors.Is(err, errTelegramThrottled) {
+			s.metrics.inc(endpoint, "throttled")
+			writeError(w, http.StatusTooManyRequests, err.Error())
+			return
+		}
+		s.metrics.inc(endpoint, "failed")
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	s.metrics.inc(endpoint, "sent")
+	s.logSent(endpoint, chatID, text)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *server) logSent(endpoint, chatID, text string) {
+	chat := effectiveChat(chatID, s.cfg.chatID)
+	if s.cfg.logContent {
+		log.Printf("event=message_sent endpoint=%s chat=%s chars=%d preview=%q", endpoint, chat, len(text), previewText(text))
+	} else {
+		log.Printf("event=message_sent endpoint=%s chat=%s chars=%d", endpoint, chat, len(text))
+	}
+}
+
+func effectiveChat(chatID, fallback string) string {
+	if chatID == "" {
+		return fallback
+	}
+	return chatID
+}
+
+func previewText(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > previewMaxLen {
+		s = s[:previewMaxLen] + "…"
+	}
+	return s
 }
 
 func (s *server) handleSend(w http.ResponseWriter, r *http.Request) {
@@ -219,13 +328,7 @@ func (s *server) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.sendMessage(req.ChatID, req.Message, req.ParseMode, req.Silent); err != nil {
-		s.metrics.inc("send", "failed")
-		writeError(w, http.StatusBadGateway, err.Error())
-		return
-	}
-	s.metrics.inc("send", "sent")
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	s.deliver(w, "send", req.ChatID, req.Message, req.ParseMode, req.Silent)
 }
 
 // handleAlertmanager accepts Alertmanager's (and Grafana's) webhook payload,
@@ -257,13 +360,7 @@ func (s *server) handleAlertmanager(w http.ResponseWriter, r *http.Request) {
 
 	// Plain text (no parse_mode) so arbitrary label/annotation content can't
 	// produce malformed markup that Telegram would reject.
-	if err := s.sendMessage("", text, "", false); err != nil {
-		s.metrics.inc("alertmanager", "failed")
-		writeError(w, http.StatusBadGateway, err.Error())
-		return
-	}
-	s.metrics.inc("alertmanager", "sent")
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	s.deliver(w, "alertmanager", "", text, "", false)
 }
 
 // formatAlertmanager renders a webhook payload into a concise plain-text page.
@@ -332,9 +429,10 @@ func redactToken(msg, token string) string {
 
 func newServer(cfg config) *server {
 	return &server{
-		cfg:     cfg,
-		client:  &http.Client{Timeout: 10 * time.Second},
-		metrics: newMetrics(),
+		cfg:      cfg,
+		client:   &http.Client{Timeout: 10 * time.Second},
+		metrics:  newMetrics(),
+		throttle: newThrottler(cfg.throttleWindow),
 	}
 }
 
@@ -354,7 +452,7 @@ func main() {
 	}
 	s := newServer(cfg)
 	addr := ":" + cfg.port
-	log.Printf("telegram-alerter listening on %s", addr)
+	log.Printf("telegram-alerter listening on %s (throttle=%s logContent=%t)", addr, cfg.throttleWindow, cfg.logContent)
 	if err := http.ListenAndServe(addr, s.routes()); err != nil {
 		log.Fatalf("server error: %v", err)
 	}

@@ -2,8 +2,8 @@ apiVersion: v2
 name: telegram-alerter
 description: A self-hosted Telegram pager for Kubernetes alerts (Grafana/Alertmanager webhooks)
 type: application
-version: 0.1.0
-appVersion: "v3"
+version: 0.2.0
+appVersion: "v4"
 home: https://github.com/cgoolsby/telegram-alerter
 sources:
   - https://github.com/cgoolsby/telegram-alerter

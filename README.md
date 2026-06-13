@@ -162,13 +162,47 @@ appVersion), `secret.create` / `secret.existingSecret`, `serviceMonitor.*`,
 `/metrics` exposes a Prometheus counter:
 
 ```
-telegram_alerter_messages_total{endpoint="send|alertmanager",result="sent|failed|rejected"}
+telegram_alerter_messages_total{endpoint="send|alertmanager",result="sent|failed|throttled|rejected"}
 ```
 
-`result` is `sent` (delivered), `failed` (Telegram rejected/unreachable), or
-`rejected` (bad auth or invalid input). Enable scraping with
-`serviceMonitor.enabled=true` and set `serviceMonitor.labels` to match your
-Prometheus release selector.
+`result` is `sent` (delivered), `failed` (Telegram rejected/unreachable),
+`throttled` (deduped by the throttle window, or Telegram 429), or `rejected`
+(bad auth or invalid input). Enable scraping with `serviceMonitor.enabled=true`
+and set `serviceMonitor.labels` to match your Prometheus release selector.
+
+## Throttling
+
+Set `config.throttleWindowSeconds` (env `THROTTLE_WINDOW_SECONDS`) to suppress
+duplicate messages — same chat + text — seen within the window. Throttled
+requests return `200 {"ok":true,"throttled":true}` (no retry) and increment the
+`throttled` metric. `0` disables it. This is in addition to Telegram's own rate
+limiting (429s also count as `throttled`).
+
+## Grafana dashboard & alerts
+
+Enable the hot-loaded dashboard and alerting rules via the chart:
+
+```sh
+helm upgrade telegram-alerter ./chart -n telegram-alerter \
+  --set serviceMonitor.enabled=true --set serviceMonitor.labels.release=kube-prometheus-stack \
+  --set grafanaDashboard.enabled=true \
+  --set prometheusRule.enabled=true
+```
+
+- **Dashboard** (`grafanaDashboard.*`) — a ConfigMap labeled for the Grafana
+  sidecar, in `grafanaDashboard.namespace` (default `monitoring`). Panels: sent/
+  failed/throttled/rejected stats, a failed-sends-&-throttles timeseries, and a
+  **last N messages sent** logs panel (from the pod logs via Loki — requires
+  `config.logMessageContent: true`). Set `grafanaDashboard.datasources.*` to
+  match your metrics/logs datasource UIDs (defaults: `victoria-metrics`, `loki`).
+- **Alerts** (`prometheusRule.*`) — `TelegramAlerterDown`,
+  `TelegramAlerterSendsFailing` (failures with zero successes),
+  `TelegramAlerterSendFailureRate`, and `TelegramAlerterThrottling`. Thresholds
+  and severities are configurable.
+
+> ⚠️ A pager can't page itself. Route the `TelegramAlerter*` alerts to a
+> **different** receiver (email/PagerDuty/a second bot) so a telegram-alerter
+> outage still reaches you.
 
 ## Grafana & Alertmanager integration
 

@@ -1,0 +1,63 @@
+{{- if .Values.prometheusRule.enabled -}}
+{{- $ns := .Release.Namespace -}}
+{{- $job := include "telegram-alerter.fullname" . -}}
+{{- $r := .Values.prometheusRule -}}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "telegram-alerter.fullname" . }}
+  namespace: {{ $r.namespace }}
+  labels:
+    {{- include "telegram-alerter.labels" . | nindent 4 }}
+    {{- with $r.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: telegram-alerter.rules
+      rules:
+        - alert: TelegramAlerterDown
+          expr: max(up{namespace="{{ $ns }}", job="{{ $job }}"}) == 0
+          for: 5m
+          labels:
+            severity: {{ $r.severity.down }}
+          annotations:
+            summary: "telegram-alerter is down"
+            description: "No telegram-alerter targets are up in namespace {{ $ns }}; alert paging is broken."
+            {{- with $r.runbookUrl }}
+            runbook_url: {{ . | quote }}
+            {{- end }}
+        - alert: TelegramAlerterSendsFailing
+          expr: (sum(increase(telegram_alerter_messages_total{namespace="{{ $ns }}", result="failed"}[10m])) > 0) and (sum(increase(telegram_alerter_messages_total{namespace="{{ $ns }}", result="sent"}[10m])) == 0)
+          for: 5m
+          labels:
+            severity: {{ $r.severity.allFailing }}
+          annotations:
+            summary: "telegram-alerter deliveries are all failing"
+            description: "Messages are failing and none have succeeded in the last 10m — pages are not reaching Telegram."
+            {{- with $r.runbookUrl }}
+            runbook_url: {{ . | quote }}
+            {{- end }}
+        - alert: TelegramAlerterSendFailureRate
+          expr: sum(rate(telegram_alerter_messages_total{namespace="{{ $ns }}", result="failed"}[5m])) > {{ $r.failureRateThreshold }}
+          for: 10m
+          labels:
+            severity: {{ $r.severity.failures }}
+          annotations:
+            summary: "telegram-alerter send failures elevated"
+            description: "Failed sends exceed {{ $r.failureRateThreshold }}/s (5m avg) in namespace {{ $ns }}."
+            {{- with $r.runbookUrl }}
+            runbook_url: {{ . | quote }}
+            {{- end }}
+        - alert: TelegramAlerterThrottling
+          expr: sum(rate(telegram_alerter_messages_total{namespace="{{ $ns }}", result="throttled"}[5m])) > {{ $r.throttleRateThreshold }}
+          for: 10m
+          labels:
+            severity: {{ $r.severity.throttling }}
+          annotations:
+            summary: "telegram-alerter is throttling messages"
+            description: "Throttled messages exceed {{ $r.throttleRateThreshold }}/s (5m avg) — duplicate or rate-limited pages are being dropped."
+            {{- with $r.runbookUrl }}
+            runbook_url: {{ . | quote }}
+            {{- end }}
+{{- end -}}

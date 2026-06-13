@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func testServer(t *testing.T, apiBase string) *server {
@@ -255,6 +256,50 @@ func TestHealthz(t *testing.T) {
 	s.routes().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+}
+
+func TestThrottleDedupesDuplicateMessages(t *testing.T) {
+	var sends int
+	tg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sends++
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer tg.Close()
+
+	s := newServer(config{
+		botToken: "test-bot-token", chatID: "12345", authToken: "test-auth-token",
+		apiBase: tg.URL, throttleWindow: time.Minute,
+	})
+
+	first := doSend(s, "Bearer test-auth-token", `{"message":"dup"}`)
+	if first.Code != http.StatusOK || strings.Contains(first.Body.String(), "throttled") {
+		t.Fatalf("first send should succeed un-throttled, got %d: %s", first.Code, first.Body.String())
+	}
+	second := doSend(s, "Bearer test-auth-token", `{"message":"dup"}`)
+	if second.Code != http.StatusOK || !strings.Contains(second.Body.String(), `"throttled":true`) {
+		t.Fatalf("second identical send should be throttled, got %d: %s", second.Code, second.Body.String())
+	}
+	if sends != 1 {
+		t.Errorf("expected exactly 1 call to telegram, got %d", sends)
+	}
+}
+
+func TestTelegram429CountedAsThrottled(t *testing.T) {
+	tg := fakeTelegram(t, http.StatusTooManyRequests, `{"ok":false,"description":"Too Many Requests: retry after 5"}`, nil)
+	defer tg.Close()
+
+	s := testServer(t, tg.URL)
+	rec := doSend(s, "Bearer test-auth-token", `{"message":"hi"}`)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	mrec := httptest.NewRecorder()
+	s.routes().ServeHTTP(mrec, req)
+	if !strings.Contains(mrec.Body.String(), `telegram_alerter_messages_total{endpoint="send",result="throttled"} 1`) {
+		t.Errorf("expected throttled counter incremented, got:\n%s", mrec.Body.String())
 	}
 }
 
